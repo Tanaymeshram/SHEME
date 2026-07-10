@@ -13,33 +13,16 @@ import {
   Legend 
 } from 'recharts';
 
+import { useApp } from '../context/AppContext';
+
 export default function AIInsights() {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const { predictions } = useApp();
 
-  useEffect(() => {
-    const fetchAIAnalytics = async () => {
-      try {
-        const stats = await api.getAIAnalytics();
-        setData(stats);
-      } catch (err) {
-        console.error("AI Insight compile error:", err);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchAIAnalytics();
-  }, []);
-
-  if (loading) {
-    return <Loader text="Compiling machine learning predictions..." />;
+  if (!predictions) {
+    return <Loader text="Acquiring neural network predictions..." />;
   }
 
-  const { forecastData, recommendations, anomalies } = data || {
-    forecastData: [],
-    recommendations: [],
-    anomalies: []
-  };
+  const { forecastData, recommendations, anomalies } = predictions;
 
   return (
     <div className="space-y-6 md:space-y-8">

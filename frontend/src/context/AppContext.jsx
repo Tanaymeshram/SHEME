@@ -1,19 +1,30 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { api } from '../services/api';
 import { useLocalStorage } from '../hooks/useLocalStorage';
+import { useFirebase } from './FirebaseContext';
 
 const AppContext = createContext();
 
 export function AppProvider({ children }) {
   const [user, setUser] = useState(null);
-  const [liveData, setLiveData] = useState(null);
-  const [alerts, setAlerts] = useState([]);
-  const [rooms, setRooms] = useState([]);
-  const [equipment, setEquipment] = useState([]);
-  const [settings, setSettings] = useState(null);
   const [theme, setTheme] = useLocalStorage('shems_theme', 'dark');
   const [systemOnline, setSystemOnline] = useState(false);
   const [loading, setLoading] = useState(true);
+
+  // Consume Cloud Firestore database subscriptions
+  const {
+    rooms,
+    alerts,
+    predictions,
+    equipment,
+    settings,
+    loading: firebaseLoading,
+    toggleRoomControl,
+    changeEquipmentState,
+    saveSettings,
+    acknowledgeAlert,
+    injectMockSpike
+  } = useFirebase();
 
   // Check user session and gateway connectivity on mount
   useEffect(() => {
@@ -36,51 +47,6 @@ export function AppProvider({ children }) {
     initSession();
   }, []);
 
-  // Poll live telemetry parameters and active alerts
-  useEffect(() => {
-    if (!user) return;
-
-    const fetchLiveFeed = async () => {
-      try {
-        const data = await api.getLiveDashboard();
-        setLiveData(data);
-        
-        const listAlerts = await api.getAlerts();
-        setAlerts(listAlerts);
-        
-        setSystemOnline(true);
-      } catch (err) {
-        console.error("Gateway live polling failure:", err);
-        setSystemOnline(false);
-      }
-    };
-
-    fetchLiveFeed();
-    const interval = setInterval(fetchLiveFeed, 3000); // 3-second heartbeat loop
-    return () => clearInterval(interval);
-  }, [user]);
-
-  // Load Rooms, Equipment, and Settings once authenticated
-  useEffect(() => {
-    if (!user) return;
-
-    const loadCoreData = async () => {
-      try {
-        const listRooms = await api.getRooms();
-        setRooms(listRooms);
-        
-        const listEq = await api.getEquipment();
-        setEquipment(listEq);
-
-        const activeSettings = await api.getSettings();
-        setSettings(activeSettings);
-      } catch (err) {
-        console.error("Error loading core data:", err);
-      }
-    };
-    loadCoreData();
-  }, [user]);
-
   // Sync page theme class on body
   useEffect(() => {
     const root = window.document.documentElement;
@@ -90,6 +56,95 @@ export function AppProvider({ children }) {
       root.classList.remove('dark');
     }
   }, [theme]);
+
+  // Derive dynamic live BEMS parameters for the Dashboard
+  const totalPower = rooms.reduce((acc, r) => acc + (r.power || 0), 0) + 
+                     equipment.reduce((acc, eq) => acc + (eq.status === 'Active' ? (eq.load || 0) : 0), 0);
+  
+  const totalEnergy = rooms.reduce((acc, r) => acc + (r.energy || 0), 0);
+
+  const avgTemp = rooms.length > 0 
+    ? rooms.reduce((acc, r) => acc + (r.temperature || 0), 0) / rooms.length 
+    : 21.5;
+
+  const avgHumidity = rooms.length > 0 
+    ? rooms.reduce((acc, r) => acc + (r.humidity || 0), 0) / rooms.length 
+    : 50.0;
+
+  const avgCo2 = rooms.length > 0 
+    ? rooms.reduce((acc, r) => acc + (r.co2 || 420), 0) / rooms.length 
+    : 450;
+
+  const totalOccupancy = rooms.reduce((acc, r) => acc + (r.occupancy || 0), 0);
+  const occupiedRooms = rooms.filter(r => r.occupancy > 0).length;
+  const emptyRooms = rooms.filter(r => r.occupancy === 0).length;
+
+  const avgEqHealth = equipment.length > 0
+    ? equipment.reduce((acc, eq) => acc + (eq.health || 100), 0) / equipment.length
+    : 95;
+
+  // Build department-wise states for Dashboard widgets
+  const departments = {};
+  rooms.forEach(room => {
+    const deptKey = room.department === 'Operation Theatre' ? 'OT' : 
+                    room.department === 'General Ward' ? 'Ward' : 
+                    room.department; // ICU, Emergency, Laboratory, Pharmacy
+    if (['ICU', 'OT', 'Ward', 'Emergency'].includes(deptKey)) {
+      departments[deptKey] = {
+        temperature: room.temperature,
+        humidity: room.humidity,
+        co2: room.co2 || 420,
+        voltage: room.voltage || 230,
+        current: room.current || 50,
+        occupancy: room.occupancy,
+        equipment_health: room.roomId === 'icu' ? 98 : (room.roomId === 'ot1' ? 99 : (room.roomId === 'ward-a' ? 92 : 89)),
+        status: room.status
+      };
+    }
+  });
+
+  // Local live streaming load simulation
+  const [liveTrend, setLiveTrend] = useState([]);
+  useEffect(() => {
+    if (rooms.length === 0) return;
+    
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+    
+    setLiveTrend(prev => {
+      const nextTrend = [...prev, {
+        time: timeStr,
+        consumption: totalPower,
+        voltage: rooms[0]?.voltage || 230,
+        carbon: totalPower * 0.475
+      }];
+      if (nextTrend.length > 25) nextTrend.shift();
+      return nextTrend;
+    });
+  }, [totalPower, rooms]);
+
+  const activeAlerts = alerts.filter(a => !a.resolved);
+
+  const liveData = {
+    kpis: {
+      total_energy_consumption_kw: totalPower,
+      live_voltage_v: rooms[0]?.voltage || 230.0,
+      live_current_a: (totalPower * 1000) / ((rooms[0]?.voltage || 230) * 0.92),
+      avg_temperature_c: avgTemp,
+      avg_humidity_p: avgHumidity,
+      avg_co2_ppm: avgCo2,
+      occupancy_status: totalOccupancy,
+      total_rooms: rooms.length,
+      occupied_rooms: occupiedRooms,
+      empty_rooms: emptyRooms,
+      total_energy_kwh: totalEnergy,
+      equipment_health_score: avgEqHealth,
+      active_alerts: activeAlerts.length
+    },
+    departments,
+    live_trend: liveTrend,
+    recent_alerts: alerts
+  };
 
   // User Actions
   const handleLogin = async (username, password) => {
@@ -105,70 +160,6 @@ export function AppProvider({ children }) {
   const handleLogout = () => {
     api.logout();
     setUser(null);
-    setLiveData(null);
-    setAlerts([]);
-    setRooms([]);
-    setEquipment([]);
-  };
-
-  // HVAC Climate Controls
-  const toggleRoomControl = async (roomId, controlType, value) => {
-    try {
-      const result = await api.updateRoomControl(roomId, controlType, value);
-      if (result.success) {
-        setRooms(prev => prev.map(r => r.id === roomId ? { ...r, [controlType]: value, power: result.room.power } : r));
-      }
-    } catch (error) {
-      console.error("HVAC control update failed:", error);
-    }
-  };
-
-  // Equipment Power Controls
-  const changeEquipmentState = async (eqId, newStatus) => {
-    try {
-      const result = await api.toggleEquipmentState(eqId, newStatus);
-      if (result.success) {
-        setEquipment(prev => prev.map(e => e.id === eqId ? { ...e, status: newStatus, load: result.eq.load, idleTime: result.eq.idleTime } : e));
-      }
-    } catch (error) {
-      console.error("Equipment status update failed:", error);
-    }
-  };
-
-  // Settings updates
-  const saveSettings = async (newSettings) => {
-    try {
-      const result = await api.updateSettings(newSettings);
-      if (result.success) {
-        setSettings(result.settings);
-        return true;
-      }
-    } catch (error) {
-      console.error("Failed to save settings:", error);
-    }
-    return false;
-  };
-
-  // Alert Actions
-  const acknowledgeAlert = async (alertId) => {
-    try {
-      const result = await api.resolveAlert(alertId);
-      if (result.success) {
-        setAlerts(prev => prev.map(a => a.id === alertId ? { ...a, resolved: true } : a));
-      }
-    } catch (error) {
-      console.error("Failed to acknowledge alert:", error);
-    }
-  };
-
-  // Action to manually inject a spike alert for presentation/test purposes
-  const injectMockSpike = async (dept) => {
-    try {
-      const newAlert = await api.triggerMockSpikeAlert(dept);
-      setAlerts(prev => [newAlert, ...prev]);
-    } catch (error) {
-      console.error("Mock alert trigger failed:", error);
-    }
   };
 
   const toggleTheme = () => {
@@ -183,9 +174,10 @@ export function AppProvider({ children }) {
       rooms,
       equipment,
       settings,
+      predictions,
       theme,
       systemOnline,
-      loading,
+      loading: loading || firebaseLoading,
       login: handleLogin,
       register: handleRegister,
       logout: handleLogout,
