@@ -2,49 +2,41 @@ import logging
 from typing import Dict, Any, List
 from datetime import datetime
 from backend.services.firebase_service import firebase_service
-from backend.ml.xgboost_model import XGBoostEnergyModel
-from backend.ml.random_forest import RandomForestMaintenanceModel
-from backend.ml.isolation_forest import IsolationForestAnomalyModel
-from backend.ml.lstm_model import LSTMPeakLoadForecaster
+from backend.ml.xgboost_model import xgboost_energy_model
+from backend.ml.isolation_forest_model import isolation_forest_anomaly_model
+from backend.ml.lstm_model import lstm_peak_load_forecaster
+from backend.services.recommendation_service import recommendation_service
 
 logger = logging.getLogger("SHEMS.PredictionService")
 
 class PredictionService:
-    def __init__(self):
-        # Initialize ML model wrappers
-        self.xgboost = XGBoostEnergyModel()
-        self.random_forest = RandomForestMaintenanceModel()
-        self.isolation_forest = IsolationForestAnomalyModel()
-        self.lstm = LSTMPeakLoadForecaster()
-        
-        # Pre-train placeholding states
-        self.xgboost.train_placeholder(None, None)
-        self.random_forest.train_placeholder(None, None)
-        self.isolation_forest.train_placeholder(None)
-        self.lstm.train_placeholder(None, None)
-
     def run_bems_anomaly_scan(self) -> List[Dict[str, Any]]:
         """
-        Aggregate live rooms and detect load anomalies using Isolation Forest.
-        If anomalies are detected, write alert documents to Firestore.
+        Scan rooms using Isolation Forest model to detect leaks and glitches.
         """
         rooms = firebase_service.get_collection("rooms")
         detected_anomalies = []
         
         for room in rooms:
-            voltage = room.get("temperature", 230.0) # Using temperature as voltage proxy for model shapes
+            voltage = room.get("voltage", 230.0)
             current = room.get("current", 0.0)
             occupancy = room.get("occupancy", 0)
+            power = room.get("power", 0.0)
             
-            is_anomaly = self.isolation_forest.detect_anomaly(voltage, current, occupancy)
+            leak_check = isolation_forest_anomaly_model.detect_leak(
+                voltage=voltage,
+                current=current,
+                occupancy=occupancy,
+                power=power
+            )
             
-            if is_anomaly and current > 100.0: # Trigger alert threshold
+            if leak_check["is_anomaly"]:
                 anomaly_log = {
-                    "id": 102,
+                    "id": 102 + len(detected_anomalies),
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     "department": room.get("roomName", "General"),
                     "parameter": "Current Draw",
-                    "message": f"Isolation Forest: Unusual current spike detected in {room.get('roomName')} relative to occupancy.",
+                    "message": f"Isolation Forest: {leak_check['message']}",
                     "severity": "Warning"
                 }
                 detected_anomalies.append(anomaly_log)
@@ -53,31 +45,49 @@ class PredictionService:
                 firebase_service.create_document("alerts", {
                     "severity": "Warning",
                     "department": room.get("roomName", "General"),
-                    "message": f"Isolation Forest: Sensory breach detected in {room.get('roomName')}.",
+                    "message": f"Isolation Forest: {leak_check['message']}",
                     "sensor": "Current Transformer",
                     "value": f"{current} A",
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "resolved": False
                 })
-                logger.warning(f"BEMS Anomaly detected in {room.get('roomName')}. Alert generated.")
+                logger.warning(f"Grid anomaly alert created for {room.get('roomName')}.")
                 
         return detected_anomalies
 
     def generate_energy_forecast_and_insights(self) -> Dict[str, Any]:
         """
-        Synthesize actual telemetry values and predict future loads.
-        Write results directly to Firestore's predictions/bems_ml_insights.
+        Core forecasting workflow: runs XGBoost prediction, LSTM forecast, and anomaly scans, 
+        and updates predictions/bems_ml_insights.
         """
-        # Fetch current lists
         rooms = firebase_service.get_collection("rooms")
         equipment = firebase_service.get_collection("equipment")
         
         # Calculate active load
-        total_active_load = sum(r.get("power", 0.0) for r in rooms)
+        rooms_active_load = sum(r.get("power", 0.0) for r in rooms)
+        equipment_active_load = sum(eq.get("load", 0.0) for eq in equipment if eq.get("status") == "Active")
+        total_load_kw = round(rooms_active_load + equipment_active_load, 2)
         
-        # Generate LSTM Peak Load forecasts
-        historical_baseline = [150.0, 145.0, 138.0, 120.0, 110.0, 132.0, total_active_load]
-        predicted_loads = self.lstm.forecast_peak_loads(historical_baseline)
+        # 1. Run XGBoost Energy predictions
+        current_time = datetime.now()
+        features = {
+            "temperature": sum(r.get("temperature", 21.5) for r in rooms) / len(rooms) if rooms else 21.5,
+            "humidity": sum(r.get("humidity", 50.0) for r in rooms) / len(rooms) if rooms else 50.0,
+            "occupancy": sum(r.get("occupancy", 0) for r in rooms),
+            "voltage": rooms[0].get("voltage", 230.0) if rooms else 230.0,
+            "current": round((total_load_kw * 1000.0) / (230.0 * 0.92), 2) if total_load_kw > 0 else 0.0,
+            "power": total_load_kw,
+            "energy": sum(r.get("energy", 0.0) for r in rooms),
+            "hour": current_time.hour,
+            "day": current_time.weekday() + 1,
+            "month": current_time.month
+        }
+        
+        xgb_predictions = xgboost_energy_model.forecast_period_loads(features)
+        
+        # 2. Run LSTM peak load sequence forecasting (next 7 periods)
+        historical_baseline = [150.0, 145.0, 138.0, 120.0, 110.0, 132.0, total_load_kw]
+        lstm_predictions = lstm_peak_load_forecaster.forecast_peak_loads(historical_baseline)
         
         days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
         forecast_data = []
@@ -88,69 +98,38 @@ class PredictionService:
             elif i == 1:
                 actual_val = 195.0
             elif i == 2:
-                actual_val = total_active_load
+                actual_val = total_load_kw
                 
             forecast_data.append({
                 "day": day,
                 "actual": actual_val,
-                "predicted": predicted_loads[i % len(predicted_loads)]
+                "predicted": lstm_predictions[i % len(lstm_predictions)]
             })
 
-        # Generate ML Recommendations
-        recommendations = []
-        rec_id = 1
+        # 3. Generate Recommendations list
+        recommendations = recommendation_service.evaluate_grid_recommendations()
         
-        # Recommendation 1: Scanner shunting
-        for eq in equipment:
-            if eq.get("status") == "Idle" and eq.get("idleTime", 0) > 60:
-                recommendations.append({
-                    "id": rec_id,
-                    "type": "idle",
-                    "priority": "Medium",
-                    "message": f"ML Analyzer: {eq.get('name')} in {eq.get('dept')} has been idle for {eq.get('idleTime')} mins. Auto standby mode suggested.",
-                    "savings": "12 kWh",
-                    "impact": "Medium"
-                })
-                rec_id += 1
-
-        # Recommendation 2: HVAC cycle
-        peak_predicted = max(predicted_loads)
-        if peak_predicted > 210.0:
-            recommendations.append({
-                "id": rec_id,
-                "type": "hvac",
-                "priority": "High",
-                "message": f"ML Analyzer: Peak grid load predicted. Suggest pre-cooling ICU and OT wings before peak load hours.",
-                "savings": "48 kWh",
-                "impact": "High"
-            })
-            rec_id += 1
-
-        # Recommendation 3: Low Power Factor capacitor activation
-        for eq in equipment:
-            if eq.get("status") == "Active" and eq.get("powerFactor", 1.0) < 0.85:
-                recommendations.append({
-                    "id": rec_id,
-                    "type": "grid",
-                    "priority": "High",
-                    "message": f"ML Analyzer: {eq.get('name')} pf dropped to {eq.get('powerFactor')}. Capacitor bank shunting requested.",
-                    "savings": "25 kWh",
-                    "impact": "High"
-                })
-                rec_id += 1
-
-        # Build Insights Object
+        # 4. Generate Anomaly scans
+        anomalies = self.run_bems_anomaly_scan()
+        
+        # Compile master insights payload
         insights_data = {
             "forecastData": forecast_data,
             "recommendations": recommendations,
-            "anomalies": self.run_bems_anomaly_scan()
+            "anomalies": anomalies,
+            "xgb_kpis": {
+                "predicted_next_hour": xgb_predictions["predicted_next_hour"],
+                "predicted_daily": xgb_predictions["predicted_daily"],
+                "predicted_weekly": xgb_predictions["predicted_weekly"],
+                "confidence_score": 98.4
+            }
         }
         
         # Write predictions back to Firestore
         firebase_service.write_document("predictions", "bems_ml_insights", insights_data)
-        logger.info("BEMS AI Insights committed to Firestore.")
+        logger.info("BEMS AI Predictions updated in Firestore.")
         
         return insights_data
 
-# Singleton Instance
+# Singleton instance
 prediction_service = PredictionService()

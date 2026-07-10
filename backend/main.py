@@ -17,6 +17,8 @@ from backend.routes.equipment import router as equipment_router
 from backend.routes.settings import router as settings_router
 from backend.routes.prediction import router as prediction_router
 from backend.routes.energy import router as energy_router
+from backend.routes.recommendation import router as recommendation_router
+from backend.routes.maintenance import router as maintenance_router
 
 # Initialize FastAPI App
 app = FastAPI(
@@ -45,13 +47,12 @@ app.include_router(equipment_router)
 app.include_router(settings_router)
 app.include_router(prediction_router)
 app.include_router(energy_router)
+app.include_router(recommendation_router)
+app.include_router(maintenance_router)
 
-# Health check endpoint (vital for frontend detectBackend handshake)
+# Health check endpoint
 @app.get("/api/ping", tags=["System"])
 async def ping_system():
-    """
-    Standard health check endpoint.
-    """
     logger.info("Handshake ping received.")
     return {
         "status": "online",
@@ -59,20 +60,14 @@ async def ping_system():
         "service": "SHEMS FastAPI Service"
     }
 
-# Compatibility alias to support matching nested UI routes
+# Compatibility routes
 @app.get("/api/analytics/ai", tags=["AI Engine"])
 async def get_ai_analytics_compat():
-    """
-    Compatibility mapping redirecting to prediction insights.
-    """
     from backend.routes.prediction import get_prediction_insights
     return await get_prediction_insights()
 
 @app.post("/api/reports/generate", tags=["Energy telemetry"])
 async def generate_report_compat(payload: dict = {}):
-    """
-    Compatibility mapping redirecting to report generator.
-    """
     from backend.routes.energy import generate_report
     return await generate_report(payload)
 

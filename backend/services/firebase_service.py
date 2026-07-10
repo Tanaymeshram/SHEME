@@ -17,7 +17,9 @@ class FirebaseService:
             "alerts": {},
             "predictions": {},
             "equipment": {},
-            "settings": {}
+            "settings": {},
+            "recommendations": {},
+            "maintenance": {}
         }
         self.initialize_firebase()
         self.seed_local_db_templates()
