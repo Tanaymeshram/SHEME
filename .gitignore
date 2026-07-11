@@ -3,6 +3,7 @@ backend/venv/
 backend/.venv/
 backend/__pycache__/
 backend/*.pyc
+backend/firebase-key.json
 
 # Node Modules and Build Output (React/Vite)
 frontend/node_modules/
