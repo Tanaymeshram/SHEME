@@ -32,7 +32,21 @@ export function FirebaseProvider({ children }) {
     
     const unsubscribe = onSnapshot(q, 
       (snapshot) => {
-        const items = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const items = snapshot.docs.map(doc => {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            ...data,
+            // Fallbacks for UI field names compatibility
+            name: data.roomName || data.name || doc.id,
+            temp: data.temperature !== undefined ? data.temperature : (data.temp !== undefined ? data.temp : 21.0),
+            cooling: data.hvac !== undefined ? data.hvac : (data.cooling !== undefined ? data.cooling : false),
+            heating: data.fan !== undefined ? data.fan : (data.heating !== undefined ? data.heating : false),
+            lighting: data.light !== undefined ? data.light : (data.lighting !== undefined ? data.lighting : false),
+            co2: data.co2 !== undefined ? data.co2 : 420,
+            maxOccupancy: data.maxOccupancy || 15
+          };
+        });
         setRooms(items);
         setLoading(false);
       },
