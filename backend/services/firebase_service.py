@@ -25,7 +25,12 @@ class FirebaseService:
         self.seed_local_db_templates()
 
     def initialize_firebase(self):
-        cred_path = settings.FIREBASE_CREDENTIALS_PATH
+        # Auto-detect default firebase-key.json in the backend/ directory
+        backend_dir = os.path.dirname(os.path.dirname(__file__))
+        default_path = os.path.join(backend_dir, "firebase-key.json")
+        
+        cred_path = settings.FIREBASE_CREDENTIALS_PATH or default_path
+        
         if cred_path and os.path.exists(cred_path):
             try:
                 # Avoid re-initialization if app already initialized
@@ -39,7 +44,7 @@ class FirebaseService:
                 logger.error(f"[FirebaseService] Connection error: {e}. Falling back to in-memory mode.")
                 self.real_firebase = False
         else:
-            logger.info("[FirebaseService] No valid credentials found. Auto-activating local in-memory BEMS sandbox.")
+            logger.info("[FirebaseService] No credentials file found. Auto-activating local in-memory BEMS sandbox.")
             self.real_firebase = False
 
     # Seed in-memory structures to mimic Firestore documents for standalone execution
