@@ -50,13 +50,17 @@ app.include_router(energy_router)
 app.include_router(recommendation_router)
 app.include_router(maintenance_router)
 
-# Health check endpoint
+# Health check endpoint (vital for frontend detectBackend handshake)
 @app.get("/api/ping", tags=["System"])
 async def ping_system():
+    """
+    Standard health check endpoint.
+    """
+    from backend.services.firebase_service import firebase_service
     logger.info("Handshake ping received.")
     return {
         "status": "online",
-        "mode": "production" if settings.FIREBASE_CREDENTIALS_PATH else "sandbox",
+        "mode": "production" if firebase_service.real_firebase else "sandbox",
         "service": "SHEMS FastAPI Service"
     }
 
